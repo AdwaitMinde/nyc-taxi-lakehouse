@@ -47,6 +47,12 @@ print(f"removed {bronze_df.count() - deduped_df.count()} dupe rows")
 # MAGIC derived column in yellow/green. duration bound converted to seconds to match
 # MAGIC (1 to 180 min -> 60 to 10800 sec). no passenger count field to check here,
 # MAGIC fhvhv doesn't report it.
+# MAGIC
+# MAGIC added a second duration check based on the actual timestamps, not just
+# MAGIC trip_time. gold_trip_duration_stats turned up a row with -58 min duration -
+# MAGIC trip_time alone passed its bounds check but didn't catch that dropoff was
+# MAGIC somehow before pickup. checking both independently now since they're
+# MAGIC supposed to agree and apparently don't always.
 
 # COMMAND ----------
 
@@ -58,8 +64,12 @@ checked_df = (
         F.col("trip_miles") > 0)
     .withColumn("is_valid_fare",
         F.col("base_passenger_fare") > 0)
-    .withColumn("is_valid_duration",
+    .withColumn("is_valid_trip_time",
         F.col("trip_time").between(60, 10800))
+    .withColumn("actual_duration_sec",
+        F.unix_timestamp("dropoff_datetime") - F.unix_timestamp("pickup_datetime"))
+    .withColumn("is_valid_actual_duration",
+        F.col("actual_duration_sec").between(60, 10800))
 )
 
 checked_df = checked_df.withColumn(
@@ -67,7 +77,8 @@ checked_df = checked_df.withColumn(
     F.col("is_valid_location") &
     F.col("is_valid_distance") &
     F.col("is_valid_fare") &
-    F.col("is_valid_duration")
+    F.col("is_valid_trip_time") &
+    F.col("is_valid_actual_duration")
 )
 
 # COMMAND ----------
@@ -77,7 +88,8 @@ checked_df.select(
     F.sum((~F.col("is_valid_location")).cast("int")).alias("bad_location"),
     F.sum((~F.col("is_valid_distance")).cast("int")).alias("bad_distance"),
     F.sum((~F.col("is_valid_fare")).cast("int")).alias("bad_fare"),
-    F.sum((~F.col("is_valid_duration")).cast("int")).alias("bad_duration"),
+    F.sum((~F.col("is_valid_trip_time")).cast("int")).alias("bad_trip_time"),
+    F.sum((~F.col("is_valid_actual_duration")).cast("int")).alias("bad_actual_duration"),
 ).show()
 
 # COMMAND ----------

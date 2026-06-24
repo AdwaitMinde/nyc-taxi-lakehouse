@@ -68,7 +68,7 @@ print(f"removed {dupes_removed} dupe rows")
 checked_df = (
     deduped_df
     .withColumn("trip_duration_min",
-        (F.col("tpep_dropoff_datetime").cast("long") - F.col("tpep_pickup_datetime").cast("long")) / 60.0)
+        (F.unix_timestamp("tpep_dropoff_datetime") - F.unix_timestamp("tpep_pickup_datetime")) / 60.0)
     .withColumn("is_valid_location",
         F.col("PULocationID").between(1, 263) & F.col("DOLocationID").between(1, 263))
     .withColumn("is_valid_passenger_count",

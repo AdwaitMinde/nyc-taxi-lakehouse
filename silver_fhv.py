@@ -2,10 +2,13 @@
 # MAGIC %md
 # MAGIC ### silver - fhv
 # MAGIC fhv bronze has way fewer columns than the other 3 (no fare, no distance, often
-# MAGIC no passenger count), so the only real check that applies here is the location
-# MAGIC id bounds. dedup key and pickup col name come from the bronze table directly
-# MAGIC instead of being hardcoded, same reasoning as the bronze fhv notebook - don't
-# MAGIC want to assume a column exists if it might not.
+# MAGIC no passenger count), so checks are limited to location ids and duration.
+# MAGIC dedup key and column names come from the bronze table directly instead of
+# MAGIC being hardcoded, same reasoning as the bronze fhv notebook - don't want to
+# MAGIC assume a column exists if it might not.
+# MAGIC
+# MAGIC originally only checked location, no duration check at all - gold layer
+# MAGIC surfaced a ~3 year long "trip" that should've been caught here. added now.
 
 # COMMAND ----------
 
@@ -64,15 +67,47 @@ print("pu_col:", pu_col, "do_col:", do_col)
 
 # COMMAND ----------
 
-if pu_col and do_col:
-    checked_df = deduped_df.withColumn(
-        "is_valid_trip",
-        F.col(pu_col).between(1, 263) & F.col(do_col).between(1, 263)
+# duration check was missing here entirely - gold_trip_duration_stats turned up
+# a 1,578,280 minute (~3 year) "trip" in this table, which is obviously bad data
+# that should've been caught here. using the same pickup/dropoff columns already
+# found above for the dedup key, reusing pickup_candidates/dropoff_candidates
+# from up there instead of re-detecting
+
+pickup_col = pickup_candidates[0] if pickup_candidates else None
+dropoff_col = dropoff_candidates[0] if dropoff_candidates else None
+print("pickup_col:", pickup_col, "dropoff_col:", dropoff_col)
+
+if pickup_col and dropoff_col:
+    deduped_df = deduped_df.withColumn(
+        "duration_sec",
+        F.unix_timestamp(dropoff_col) - F.unix_timestamp(pickup_col)
     )
+    has_duration_check = True
 else:
-    # no location columns found at all, can't apply the check - everything passes
-    # through untouched rather than guessing
-    checked_df = deduped_df.withColumn("is_valid_trip", F.lit(True))
+    has_duration_check = False
+
+# COMMAND ----------
+
+location_check = F.lit(True)
+if pu_col and do_col:
+    location_check = F.col(pu_col).between(1, 263) & F.col(do_col).between(1, 263)
+
+duration_check = F.lit(True)
+if has_duration_check:
+    # same 1-180 min bound as the other 3 datasets, in seconds
+    duration_check = F.col("duration_sec").between(60, 10800)
+
+checked_df = deduped_df.withColumn("is_valid_location", location_check) \
+    .withColumn("is_valid_duration", duration_check) \
+    .withColumn("is_valid_trip", location_check & duration_check)
+
+# COMMAND ----------
+
+checked_df.select(
+    F.count("*").alias("total"),
+    F.sum((~F.col("is_valid_location")).cast("int")).alias("bad_location"),
+    F.sum((~F.col("is_valid_duration")).cast("int")).alias("bad_duration"),
+).show()
 
 # COMMAND ----------
 
