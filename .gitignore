@@ -1,0 +1,24 @@
+# Raw/processed data — large parquet files, never commit these
+data/raw/
+data/processed/
+*.parquet
+
+# Databricks CLI config (contains OAuth token references)
+.databrickscfg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.code-workspace
