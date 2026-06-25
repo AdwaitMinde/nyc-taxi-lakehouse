@@ -3,7 +3,15 @@
 A medallion-architecture (bronze → silver → gold) data pipeline built on
 Databricks Free Edition, using NYC TLC trip data (Yellow, Green, FHV, FHVHV)
 covering the most recent 12 published months, orchestrated end to end and
-served through a local Streamlit dashboard.
+served through a Streamlit dashboard.
+
+**Live dashboard:** https://nyc-taxi-lakehouse-dashboard.streamlit.app/
+
+**For the full technical writeup** — every phase, every design decision and
+why it was made, the real bugs hit along the way (including a Spark ANSI
+mode cast bug that silently existed in five files), and the deployment
+story — see [`DOCUMENTATION.md`](DOCUMENTATION.md). This README is the
+short version.
 
 Built deliberately around Databricks Free Edition's constraints —
 serverless-only compute, restricted outbound internet, daily compute quotas
@@ -21,7 +29,7 @@ writeups of the reasoning behind each design choice.
 | Gold | Databricks (serverless) | Business aggregates: revenue, demand patterns, durations |
 | Orchestration | Databricks Jobs | 12-task DAG chaining bronze -> silver -> gold |
 | Data quality | Plain PySpark checks | Bounds/dedup logic in the silver notebooks themselves |
-| Consumption | Local Streamlit | Dashboard querying gold tables via SQL connector |
+| Consumption | Streamlit (local + deployed) | Dashboard querying gold tables via SQL connector |
 
 Data quality was originally planned around Great Expectations, but GX has
 an open compatibility issue with Databricks serverless compute
