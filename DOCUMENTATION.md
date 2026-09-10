@@ -434,16 +434,3 @@ data/         local raw parquet landing zone (gitignored, not in repo)
 - **Join `PULocationID`/`DOLocationID` against the TLC's taxi zone
   lookup table** in the dashboard, so zone IDs show as actual
   neighborhood names instead of bare integers.
-- **Moved the dashboard off a live Databricks connection to a static
-  snapshot** (`scripts/export_gold_snapshot.py` writes the four gold
-  tables to `dashboard/snapshot/*.parquet`, and `app.py` reads those
-  instead of querying live). This wasn't in the original plan - it came
-  from realizing that every visitor to the deployed dashboard was
-  triggering a live query against the SQL warehouse, which meant every
-  visitor could hit a cold start, and repeated visits across a day could
-  push against Free Edition's compute quota. Neither risk is
-  visitor-facing-appropriate for a portfolio piece meant to load
-  reliably on the first click. Trading live data for a manually-refreshed
-  snapshot moves both the cold start and the quota usage onto one person
-  (me, running the export script after each DAG run) instead of onto
-  whoever clicks the link.
