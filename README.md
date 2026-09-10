@@ -29,7 +29,7 @@ writeups of the reasoning behind each design choice.
 | Gold | Databricks (serverless) | Business aggregates: revenue, demand patterns, durations |
 | Orchestration | Databricks Jobs | 12-task DAG chaining bronze -> silver -> gold |
 | Data quality | Plain PySpark checks | Bounds/dedup logic in the silver notebooks themselves |
-| Consumption | Streamlit (local + deployed) | Dashboard querying gold tables via SQL connector |
+| Consumption | Streamlit (local + deployed) | Dashboard reading a local Parquet snapshot of the gold tables |
 
 Data quality was originally planned around Great Expectations, but GX has
 an open compatibility issue with Databricks serverless compute
@@ -102,9 +102,13 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Needs three environment variables set first (server hostname, HTTP path,
-and a personal access token) — see `dashboard/README.md` for where to find
-each value and how to generate the token.
+The app reads gold-table data from a static Parquet snapshot in
+`dashboard/snapshot/`, not a live Databricks connection — no environment
+variables needed to run it. That snapshot is refreshed manually after each
+DAG run with `scripts/export_gold_snapshot.py`, which does need the same
+three env vars (server hostname, HTTP path, PAT) the old live connector
+used. See "Refreshing dashboard data" in
+[`dashboard/DEPLOYMENT.md`](dashboard/DEPLOYMENT.md).
 
 ## Data source
 

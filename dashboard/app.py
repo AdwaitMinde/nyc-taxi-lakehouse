@@ -1,80 +1,64 @@
 """
 app.py - NYC Taxi Lakehouse dashboard
 
-Local streamlit app, queries the 4 gold tables via the databricks SQL
-connector. Needs a SQL warehouse, not jobs/notebook compute - the connector
-doesn't support connecting to jobs compute, so this points at the
-auto-created "Starter Warehouse" rather than anything from the job DAG.
-
-Auth is a personal access token, set via env vars (never hardcoded, never
-committed). Database connector docs recommend OAuth over PATs generally,
-but OAuth's browser-based flow doesn't fit a long-running local script well
-- PAT is the right tool here even though it's a step down security-wise.
-Kept the token lifetime short (90 days) for that reason.
+Local streamlit app, reads the 4 gold tables from a local Parquet snapshot
+(dashboard/snapshot/) instead of querying Databricks live. The snapshot is
+refreshed manually by running scripts/export_gold_snapshot.py after each
+DAG run - see dashboard/DEPLOYMENT.md for the "Refreshing dashboard data"
+section.
 
 Run with:
     streamlit run app.py
-
-Needs these env vars set first (PowerShell):
-    $env:DATABRICKS_SERVER_HOSTNAME = "dbc-0b78111c-44a0.cloud.databricks.com"
-    $env:DATABRICKS_HTTP_PATH = "/sql/1.0/warehouses/cd14778cab65ff40"
-    $env:DATABRICKS_TOKEN = "dapi..."
 """
 
-import os
+import json
+from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from databricks import sql
 
 st.set_page_config(page_title="NYC Taxi Lakehouse", layout="wide")
 
-CATALOG = "nyc_taxi"
+SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshot"
 
 
-@st.cache_resource
-def get_connection():
-    server_hostname = os.environ["DATABRICKS_SERVER_HOSTNAME"]
-    http_path = os.environ["DATABRICKS_HTTP_PATH"]
-    token = os.environ["DATABRICKS_TOKEN"]
-    return sql.connect(
-        server_hostname=server_hostname,
-        http_path=http_path,
-        access_token=token,
+@st.cache_data
+def load_table(name: str) -> pd.DataFrame:
+    path = SNAPSHOT_DIR / f"{name}.parquet"
+    return pd.read_parquet(path)
+
+
+@st.cache_data
+def load_metadata() -> dict:
+    path = SNAPSHOT_DIR / "metadata.json"
+    with open(path) as f:
+        return json.load(f)
+
+
+def snapshot_missing_error(name: str):
+    st.error(
+        f"Snapshot file `{name}.parquet` is missing from `dashboard/snapshot/`. "
+        "Run `python scripts/export_gold_snapshot.py` to generate it, then "
+        "commit and push the `dashboard/snapshot/` folder."
     )
-
-
-@st.cache_data(ttl=600)
-def run_query(query: str) -> pd.DataFrame:
-    # not using fetchall_arrow here - pyarrow is an extra dependency and our
-    # gold tables are small aggregates already, no real need for it
-    conn = get_connection()
-    with conn.cursor() as cursor:
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        columns = [col[0] for col in cursor.description]
-    return pd.DataFrame(rows, columns=columns)
+    st.stop()
 
 
 st.title("NYC Taxi Lakehouse")
 st.caption("Yellow, Green, FHV, and FHVHV trips - May 2025 through April 2026")
 
-with st.spinner(
-    "Connecting to the Databricks SQL warehouse... this runs on serverless "
-    "compute that suspends after ~10 minutes idle, so a cold start can take "
-    "a few minutes if nobody's viewed this recently. Hang tight."
-):
-    try:
-        test_df = run_query("SELECT 1")
-    except KeyError as e:
-        st.error(
-            f"Missing environment variable: {e}. Set DATABRICKS_SERVER_HOSTNAME, "
-            "DATABRICKS_HTTP_PATH, and DATABRICKS_TOKEN before running this app."
-        )
-        st.stop()
-    except Exception as e:
-        st.error(f"Could not connect to Databricks: {e}")
-        st.stop()
+try:
+    metadata = load_metadata()
+    exported_at = datetime.fromisoformat(metadata["exported_at"])
+    data_as_of = f"Data as of {exported_at.strftime('%B %d, %Y')} (UTC)"
+except FileNotFoundError:
+    st.error(
+        "`dashboard/snapshot/metadata.json` is missing. Run "
+        "`python scripts/export_gold_snapshot.py` to generate a snapshot, "
+        "then commit and push the `dashboard/snapshot/` folder."
+    )
+    st.stop()
 
 tab_overview, tab_demand, tab_revenue, tab_duration = st.tabs(
     ["Overview", "Demand patterns", "Revenue", "Trip duration"]
@@ -82,12 +66,18 @@ tab_overview, tab_demand, tab_revenue, tab_duration = st.tabs(
 
 # ---------- Overview ----------
 with tab_overview:
-    counts_df = run_query(f"""
-        SELECT trip_type, COUNT(*) AS trip_count
-        FROM {CATALOG}.gold.trips_unified
-        GROUP BY trip_type
-        ORDER BY trip_count DESC
-    """)
+    st.caption(data_as_of)
+    try:
+        trips_df = load_table("gold_trips_unified")
+    except FileNotFoundError:
+        snapshot_missing_error("gold_trips_unified")
+
+    counts_df = (
+        trips_df.groupby("trip_type")
+        .size()
+        .reset_index(name="trip_count")
+        .sort_values("trip_count", ascending=False)
+    )
 
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -103,14 +93,13 @@ with tab_overview:
 
 # ---------- Demand patterns ----------
 with tab_demand:
+    st.caption(data_as_of)
     st.subheader("Trips by hour of day")
 
-    hourly_df = run_query(f"""
-        SELECT pickup_hour, trip_type, SUM(trip_count) AS trip_count
-        FROM {CATALOG}.gold.demand_patterns
-        GROUP BY pickup_hour, trip_type
-        ORDER BY pickup_hour
-    """)
+    try:
+        hourly_df = load_table("gold_demand_patterns")
+    except FileNotFoundError:
+        snapshot_missing_error("gold_demand_patterns")
 
     selected_types = st.multiselect(
         "Trip type",
@@ -118,22 +107,28 @@ with tab_demand:
         default=sorted(hourly_df["trip_type"].unique()),
     )
     filtered = hourly_df[hourly_df["trip_type"].isin(selected_types)]
-    pivoted = filtered.pivot(index="pickup_hour", columns="trip_type", values="trip_count")
+    grouped = (
+        filtered.groupby(["pickup_hour", "trip_type"])["trip_count"]
+        .sum()
+        .reset_index()
+    )
+    pivoted = grouped.pivot(index="pickup_hour", columns="trip_type", values="trip_count")
     st.line_chart(pivoted)
 
     st.subheader("Top 10 pickup zones (all trip types combined)")
-    top_zones_df = run_query(f"""
-        SELECT PULocationID, SUM(trip_count) AS trip_count
-        FROM {CATALOG}.gold.demand_patterns
-        GROUP BY PULocationID
-        ORDER BY trip_count DESC
-        LIMIT 10
-    """)
+    top_zones_df = (
+        hourly_df.groupby("PULocationID")["trip_count"]
+        .sum()
+        .reset_index()
+        .sort_values("trip_count", ascending=False)
+        .head(10)
+    )
     st.bar_chart(top_zones_df.set_index("PULocationID"))
     st.caption("Zone IDs match the TLC taxi zone lookup table (1-263), not joined here.")
 
 # ---------- Revenue ----------
 with tab_revenue:
+    st.caption(data_as_of)
     st.subheader("Revenue by trip type")
     st.caption(
         "fhv excluded - no fare data in that dataset. fhvhv's total_revenue "
@@ -141,12 +136,17 @@ with tab_revenue:
         "total_amount, but the closest equivalent available."
     )
 
-    rev_by_type_df = run_query(f"""
-        SELECT trip_type, SUM(total_revenue) AS revenue, SUM(trip_count) AS trip_count
-        FROM {CATALOG}.gold.revenue_by_zone_hour
-        GROUP BY trip_type
-        ORDER BY revenue DESC
-    """)
+    try:
+        revenue_df = load_table("gold_revenue_by_zone_hour")
+    except FileNotFoundError:
+        snapshot_missing_error("gold_revenue_by_zone_hour")
+
+    rev_by_type_df = (
+        revenue_df.groupby("trip_type")
+        .agg(revenue=("total_revenue", "sum"), trip_count=("trip_count", "sum"))
+        .reset_index()
+        .sort_values("revenue", ascending=False)
+    )
     rev_by_type_df["revenue_per_trip"] = (
         rev_by_type_df["revenue"] / rev_by_type_df["trip_count"]
     ).round(2)
@@ -158,25 +158,36 @@ with tab_revenue:
         st.dataframe(rev_by_type_df, hide_index=True, use_container_width=True)
 
     st.subheader("Revenue by hour of day")
-    rev_by_hour_df = run_query(f"""
-        SELECT pickup_hour, trip_type, SUM(total_revenue) AS revenue
-        FROM {CATALOG}.gold.revenue_by_zone_hour
-        GROUP BY pickup_hour, trip_type
-        ORDER BY pickup_hour
-    """)
+    rev_by_hour_df = (
+        revenue_df.groupby(["pickup_hour", "trip_type"])["total_revenue"]
+        .sum()
+        .reset_index()
+        .rename(columns={"total_revenue": "revenue"})
+    )
     rev_pivoted = rev_by_hour_df.pivot(index="pickup_hour", columns="trip_type", values="revenue")
     st.line_chart(rev_pivoted)
 
 # ---------- Trip duration ----------
 with tab_duration:
+    st.caption(data_as_of)
     st.subheader("Trip duration distribution")
 
-    duration_df = run_query(f"""
-        SELECT trip_type, trip_count, avg_duration_min, median_duration_min,
-               p90_duration_min, min_duration_min, max_duration_min
-        FROM {CATALOG}.gold.trip_duration_stats
-        ORDER BY trip_count DESC
-    """)
+    try:
+        duration_df = load_table("gold_trip_duration_stats")
+    except FileNotFoundError:
+        snapshot_missing_error("gold_trip_duration_stats")
+
+    duration_df = duration_df[
+        [
+            "trip_type",
+            "trip_count",
+            "avg_duration_min",
+            "median_duration_min",
+            "p90_duration_min",
+            "min_duration_min",
+            "max_duration_min",
+        ]
+    ].sort_values("trip_count", ascending=False)
     st.dataframe(duration_df, hide_index=True, use_container_width=True)
 
     chart_df = duration_df.set_index("trip_type")[
